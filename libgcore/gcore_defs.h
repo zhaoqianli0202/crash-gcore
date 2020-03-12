@@ -167,6 +167,8 @@
 #endif
 
 #define PAGE_ALIGN(X) roundup(X, ELF_EXEC_PAGESIZE)
+#define PAGE_SHIFT 12
+#define PAGE_MASK (~(PAGE_SIZE-1))
 
 /*
  * gcore_regset.c

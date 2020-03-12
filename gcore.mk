@@ -71,6 +71,7 @@ ifeq ($(shell /bin/ls ../defs.h 2> /dev/null), ../defs.h)
 endif
 
 GCORE_CFILES = \
+	minilzo-2.10/minilzo.c \
 	libgcore/gcore_coredump.c \
 	libgcore/gcore_coredump_table.c \
 	libgcore/gcore_dumpfilter.c \
