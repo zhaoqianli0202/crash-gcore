@@ -15,6 +15,7 @@
 
 #include <defs.h>
 #include <gcore_defs.h>
+#include "../minilzo-2.10/minilzo.h"
 
 static struct elf_note_info *elf_note_info_init(void);
 
@@ -60,6 +61,195 @@ static inline int thread_group_leader(ulong task);
 
 static int uvtop_quiet(ulong vaddr, physaddr_t *paddr);
 
+static unsigned char zram_buf[1UL << PAGE_SHIFT];
+
+unsigned char *zram_object_addr(ulong pool, ulong handle)
+{
+	ulong obj, off, class, page, zspage;
+	struct zspage zspage_s;
+	physaddr_t paddr;
+	unsigned int obj_idx, class_idx, size;
+	ulong pages[2], sizes[2];
+
+	READ_POINTER(handle, &obj);
+	obj >>= OBJ_TAG_BITS;
+	page = pfn_to_map(obj >> OBJ_INDEX_BITS);
+	obj_idx = (obj & OBJ_INDEX_MASK);
+
+	READ_POINTER(page + GCORE_OFFSET(page_private), &zspage);
+	readmem(zspage, KVADDR,
+			&zspage_s, sizeof(struct zspage), "readmem address",
+			gcore_verbose_error_handle());
+
+	class_idx = zspage_s.class;
+	if(zspage_s.magic != ZSPAGE_MAGIC)
+		error(FATAL, "zspage magic incorrect:0x%x\n", zspage_s.magic);
+
+	class = pool + GCORE_OFFSET(poll_size_class);
+	class += (class_idx * sizeof(void *));
+	READ_POINTER(class, &class);
+	readmem(class + GCORE_OFFSET(size_class_size), KVADDR,
+			&size, sizeof(unsigned int), "readmem address",
+			gcore_verbose_error_handle());
+	off = (size * obj_idx) & ~PAGE_MASK;
+	if (off + size <= PAGE_SIZE) {
+		if (!is_page_ptr(page, &paddr)) {
+			error(WARNING, "zspage not a page pointer:%lx\n", page);
+			return NULL;
+		}
+		readmem(paddr + off, PHYSADDR, zram_buf, size, "readmem zram buffer", gcore_verbose_error_handle());
+		goto out;
+	}
+
+	pages[0] = page;
+	READ_POINTER(page + GCORE_OFFSET(page_freelist), &pages[1]);
+	sizes[0] = PAGE_SIZE - off;
+	sizes[1] = size - sizes[0];
+	if (!is_page_ptr(pages[0], &paddr)) {
+		error(WARNING, "pages[0] not a page pointer\n");
+		return NULL;
+	}
+
+	readmem(paddr + off, PHYSADDR, zram_buf, sizes[0], "readmem zram buffer", gcore_verbose_error_handle());
+	if (!is_page_ptr(pages[1], &paddr)) {
+		error(WARNING, "pages[1] not a page pointer\n");
+		return NULL;
+	}
+
+	readmem(paddr, PHYSADDR, zram_buf + sizes[0], sizes[1], "readmem zram buffer", gcore_verbose_error_handle());
+
+out:
+	READ_POINTER(page, &obj);
+	if(!(obj & (1<<10))) { //PG_OwnerPriv1 flag
+		return (zram_buf + ZS_HANDLE_SIZE);
+	}
+
+	return zram_buf;
+}
+
+unsigned char *lookup_swap_cache(ulong pte_val)
+{
+	ulong swp_type, swp_offset, swp_space;
+	struct list_pair lp;
+	physaddr_t paddr;
+	swp_type = __swp_type(pte_val);
+	if (THIS_KERNEL_VERSION >= LINUX(2,6,0)) {
+		swp_offset = (ulonglong)__swp_offset(pte_val);
+	} else {
+		swp_offset = (ulonglong)SWP_OFFSET(pte_val);
+	}
+
+	if (!symbol_exists("swapper_spaces"))
+		return NULL;
+	swp_space = symbol_value("swapper_spaces");
+	swp_space += swp_type * sizeof(void *);
+	READ_POINTER(swp_space, &swp_space);
+	swp_space += (swp_offset >> SWAP_ADDRESS_SPACE_SHIFT) * GCORE_SIZE(address_spaces);
+
+	lp.index = swp_offset;
+	if(do_radix_tree(swp_space, RADIX_TREE_SEARCH, &lp)){
+		progressf("Find page in swap cache\n");
+		if (!is_page_ptr((ulong)lp.value, &paddr)) {
+			error(WARNING, "radix page not a page pointer\n");
+			return NULL;
+		}
+		readmem(paddr, PHYSADDR, zram_buf, PAGE_SIZE, "readmem zram buffer", gcore_verbose_error_handle());
+		return zram_buf;
+	}
+	return NULL;
+}
+
+ulong (*decompressor)(unsigned char *in_addr, ulong in_size, unsigned char *out_addr, ulong *out_size, void *other/* NOT USED */);
+ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
+{
+	ulong ret = 0;
+	char name[32] = {0};
+	ulonglong swp_offset;
+	ulong swap_info, bdev, bd_disk, zram, zram_table_entry, sector, index, entry, flags, size, outsize;
+	unsigned char *obj_addr = NULL;
+
+	if(pte_val & PTE_VALID)
+		return ret;
+
+    if (!symbol_exists("swap_info"))
+		return ret;
+
+	swap_info = symbol_value("swap_info");
+	if (vt->flags & SWAPINFO_V2) {
+		swap_info += (__swp_type(pte_val) * sizeof(void *));
+		READ_POINTER(swap_info, &swap_info);
+	} else {
+		swap_info += (SIZE(swap_info_struct) * __swp_type(pte_val));
+	}
+
+	READ_POINTER(swap_info + GCORE_OFFSET(swap_info_bdev), &bdev);
+	READ_POINTER(bdev + OFFSET(block_device_bd_disk), &bd_disk);
+
+	readmem(bd_disk + GCORE_OFFSET(gendisk_name), KVADDR, name,
+			strlen("zram"), "read disk name", gcore_verbose_error_handle());
+	if (!strncmp(name, "zram", strlen("zram"))) {
+		error(WARNING, "This page has swaped to zram\n");
+		READ_POINTER(bd_disk + GCORE_OFFSET(gendisk_private_data), &zram);
+
+		readmem(zram + GCORE_OFFSET(zram_compressor), KVADDR, name,
+			sizeof(name), "zram compressor", gcore_verbose_error_handle());
+		if(!strncmp(name, "lzo", strlen("lzo"))) {
+			decompressor = (void *)lzo1x_decompress_safe;
+		} else {//todo,to support more compressor
+			error(WARNING, "Only support lzo compressor\n");
+			return ret;
+		}
+
+		if (THIS_KERNEL_VERSION >= LINUX(2,6,0)) {
+			swp_offset = (ulonglong)__swp_offset(pte_val);
+		} else {
+			swp_offset = (ulonglong)SWP_OFFSET(pte_val);
+		}
+
+		obj_addr = lookup_swap_cache(pte_val); //lookup page from swap cache
+		if (obj_addr != NULL) {
+			memcpy(buf, obj_addr, PAGE_SIZE);
+			return PAGE_SIZE;
+		}
+
+		sector = swp_offset << (PAGE_SHIFT - 9);
+		index = sector >> SECTORS_PER_PAGE_SHIFT;
+		READ_POINTER(zram, &zram_table_entry);
+		zram_table_entry += (index * GCORE_SIZE(zram_table_entrys));
+		READ_POINTER(zram_table_entry, &entry);
+		READ_POINTER(zram_table_entry + GCORE_OFFSET(zram_table_flag), &flags);
+
+		if (!entry || (flags & ZRAM_FLAG_SAME_BIT)) {
+			ulong value;
+			READ_POINTER(zram_table_entry, &value);
+			value = entry ? value : 0;
+			memset(buf, value, PAGE_SIZE);
+			return PAGE_SIZE;
+		}
+		size = flags & (ZRAM_FLAG_SHIFT -1);
+		if (size == 0) {
+			return ret;
+		}
+
+		READ_POINTER(zram + GCORE_OFFSET(zram_mempoll), &zram);
+		obj_addr = zram_object_addr(zram, entry);
+		if (obj_addr == NULL)
+			return 0;
+
+		if (size == PAGE_SIZE) {
+			memcpy(buf, obj_addr, PAGE_SIZE);
+			ret = PAGE_SIZE;
+		} else {
+			ret = decompressor(obj_addr, size, buf, &outsize, NULL);
+			if (ret == LZO_E_OK)
+				ret = outsize;
+			else
+				error(WARNING, "zram decompress error\n");
+		}
+	}
+	return ret;
+}
+
 void gcore_coredump(void)
 {
 	struct elf_note_info *info;
@@ -87,6 +277,7 @@ void gcore_coredump(void)
 	info = elf_note_info_init();
 
 	fill_elf_header(phnum);
+	lzo_init();
 
 	progressf("Opening file %s ... \n", gcore->corename);
 	gcore->fp = fopen(gcore->corename, "w");
@@ -212,7 +403,8 @@ void gcore_coredump(void)
 		progressf("PT_LOAD[%lu]: %lx - %lx\n", index, vm_start, end);
 
 		for (addr = vm_start; addr < end; addr += PAGE_SIZE) {
-			physaddr_t paddr;
+			physaddr_t paddr = 0;
+			ulong pte_val;
 
 			if (uvtop_quiet(addr, &paddr)) {
 				readmem(paddr, PHYSADDR, buffer, PAGE_SIZE,
@@ -225,6 +417,18 @@ void gcore_coredump(void)
 					      strerror(errno));
 			} else {
 				pagefaultf("page fault at %lx\n", addr);
+				if (paddr != 0) {
+					pte_val = paddr;
+					if(try_zram_decompress(pte_val, (unsigned char *)buffer) == PAGE_SIZE)
+					{
+						error(WARNING, "zram decompress successed\n");
+						if (fwrite(buffer, PAGE_SIZE, 1, gcore->fp) != 1)
+							error(FATAL, "%s: write: %s\n",
+								gcore->corename,
+								strerror(errno));
+						continue;
+					}
+				}
 
 				/* Fill unavailable page-faulted pages
 				 * with 0 for ease of implementation;

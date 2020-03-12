@@ -509,6 +509,17 @@ static void gcore_offset_table_init(void)
 		GCORE_MEMBER_OFFSET_INIT(task_struct_thread_pid, "task_struct", "thread_pid");
 	if (MEMBER_EXISTS("signal_struct", "pids"))
 		GCORE_MEMBER_OFFSET_INIT(signal_struct_pids, "signal_struct", "pids");
+
+	GCORE_MEMBER_OFFSET_INIT(swap_info_bdev, "swap_info_struct", "bdev");
+	GCORE_MEMBER_OFFSET_INIT(gendisk_name, "gendisk", "disk_name");
+	GCORE_MEMBER_OFFSET_INIT(gendisk_private_data, "gendisk", "private_data");
+	GCORE_MEMBER_OFFSET_INIT(zram_mempoll, "zram", "mem_pool");
+	GCORE_MEMBER_OFFSET_INIT(zram_compressor, "zram", "compressor");
+	GCORE_MEMBER_OFFSET_INIT(zram_table_flag, "zram_table_entry", "flags");
+	GCORE_MEMBER_OFFSET_INIT(page_private, "page", "private");
+	GCORE_MEMBER_OFFSET_INIT(poll_size_class, "zs_pool", "size_class");
+	GCORE_MEMBER_OFFSET_INIT(size_class_size, "size_class", "size");
+	GCORE_MEMBER_OFFSET_INIT(page_freelist, "page", "freelist");
 }
 
 static void gcore_size_table_init(void)
@@ -534,6 +545,8 @@ static void gcore_size_table_init(void)
 	GCORE_MEMBER_SIZE_INIT(vfp_hard_struct_fpregs, "vfp_hard_struct", "fpregs");
 	GCORE_MEMBER_SIZE_INIT(vfp_hard_struct_fpscr, "vfp_hard_struct", "fpscr");
 
+	GCORE_STRUCT_SIZE_INIT(zram_table_entrys, "zram_table_entry");
+	GCORE_STRUCT_SIZE_INIT(address_spaces, "address_space");
 }
 
 static void gcore_machdep_init(void)

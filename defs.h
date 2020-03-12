@@ -4877,7 +4877,7 @@ void cmd_s390dbf(void);
 #endif
 void cmd_map(void);          /* kvmdump.c */
 void cmd_ipcs(void);         /* ipcs.c */
-
+ulong pfn_to_map(ulong pfn);
 /*
  *  main.c
  */
