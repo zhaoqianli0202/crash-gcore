@@ -70,7 +70,13 @@ struct zspage {
         unsigned int isolated : 3;
         unsigned int magic : 8;
     };
+    unsigned int inuse;
+    unsigned int freeobj;
 };
+
+#define READ_POINTER(addr, pval) \
+				(readmem(addr, KVADDR, pval, sizeof(void *), \
+				"readmem address", gcore_verbose_error_handle()));
 
 #define OBJ_TAG_BITS 1
 #define _PFN_BITS		(PHYS_MASK_SHIFT - PAGE_SHIFT)
@@ -80,28 +86,34 @@ struct zspage {
 
 unsigned char *zram_object_addr(ulong pool, ulong handle)
 {
-	unsigned long obj, off, class, size;
-	ulong page;
+	ulong obj, off, class, size, page, zspage;
+	struct zspage zspage_s;
 	physaddr_t paddr;
 	unsigned int obj_idx, class_idx;
-	struct zspage *zspage;
 	ulong pages[2], sizes[2];
 
-	obj = ULONG(handle);
-
+	READ_POINTER(handle, &obj);
+	progressf("zql:zram_object_addr obj=0x%lx\n", obj);
 	obj >>= OBJ_TAG_BITS;
 	page = pfn_to_map(obj >> OBJ_INDEX_BITS);
+	progressf("zql:zram_object_addr page=0x%lx\n", page);
 	obj_idx = (obj & OBJ_INDEX_MASK);
 #define PAGE_PRIVATE_OFFSET 40
-	zspage = (struct zspage *)ULONG(page + PAGE_PRIVATE_OFFSET);
-	progressf("zspage magic:0x%x\n", zspage->magic);
-	class_idx = zspage->class;
+	READ_POINTER(page + PAGE_PRIVATE_OFFSET, &zspage);
+	readmem(zspage, KVADDR,
+			&zspage_s, sizeof(struct zspage), "readmem address",
+			gcore_verbose_error_handle());
+
+	progressf("zspage magic:0x%x\n", zspage_s.magic);
+	class_idx = zspage_s.class;
 #define POOL_SIZE_CLASS_OFFSET 8
 #define POOL_SIZE_CLASS_SIZE 152
 #define SIZE_CLASS_SIZE_OFFSET  88
-	class = ULONG(pool + POOL_SIZE_CLASS_OFFSET);
+	READ_POINTER(pool + POOL_SIZE_CLASS_OFFSET, &class);
 	class += (class_idx * POOL_SIZE_CLASS_SIZE);
-	size = UINT(class + SIZE_CLASS_SIZE_OFFSET);
+	readmem(class + SIZE_CLASS_SIZE_OFFSET, KVADDR,
+			&size, sizeof(unsigned int), "readmem address",
+			gcore_verbose_error_handle());
 	off = (size * obj_idx) & ~PAGE_MASK;
 	if (off + size <= PAGE_SIZE) {
 		is_page_ptr(page, &paddr);//get phy addr
@@ -110,7 +122,7 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 	}
 #define PAGE_FREELIST_OFFSET 32
 	pages[0] = page;
-	pages[1] = ULONG(page + PAGE_FREELIST_OFFSET);
+	READ_POINTER(page + PAGE_FREELIST_OFFSET, &pages[1]);
 	sizes[0] = PAGE_SIZE - off;
 	sizes[1] = size - sizes[0];
 
@@ -119,7 +131,8 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 	is_page_ptr(pages[1], &paddr);
 	readmem(PTOV(paddr), KVADDR, zram_buf + sizes[0], sizes[1], "readmem zram buffer", gcore_verbose_error_handle());
 #define ZS_HANDLE_SIZE (sizeof(unsigned long))
-	if(!(ULONG(page) & (1<<10))) { //PG_OwnerPriv1 flag
+	READ_POINTER(page, &obj);
+	if(!(obj & (1<<10))) { //PG_OwnerPriv1 flag
 		return (zram_buf + ZS_HANDLE_SIZE);
 	}
 
@@ -133,36 +146,65 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 {
 	ulong ret = 0;
-	char disk_name[32];
+	char disk_name[32] = {0};
 	ulonglong swp_offset;
-	ulong bdev, bd_disk, zram, sector, index, entry, size;
+	ulong swap_info, bdev, bd_disk, zram, zram_table_entry, sector, index, entry, size;
 	unsigned char *obj_addr;
 
+	progressf("try_zram_decompress pte_val=0x%lx\n",pte_val);
+
+	if(pte_val & PTE_VALID)
+		return ret;
 #define SWAP_INFO_BDEV_OFFSET 224
 #define GENDISK_DISK_NAME_OFFSET 12
-	bdev = ULONG(vt->swap_info_struct + SWAP_INFO_BDEV_OFFSET);
-	bd_disk = ULONG(bdev + OFFSET(block_device_bd_disk));
-	bdev = ULONG(bd_disk + GENDISK_DISK_NAME_OFFSET);
-	readmem(bdev, KVADDR, disk_name, 
+    if (!symbol_exists("swap_info"))
+		return ret;
+
+	swap_info = symbol_value("swap_info");
+	progressf("try_zram_decompress111 swap_info=%lx\n", swap_info);
+	if (vt->flags & SWAPINFO_V2) {
+		swap_info += (__swp_type(pte_val) * sizeof(void *));
+		progressf("try_zram_decompress222 swap_info=%lx\n", swap_info);
+		READ_POINTER(swap_info, &swap_info);
+		progressf("try_zram_decompress333 swap_info=%lx\n", swap_info);
+	} else {
+		swap_info += (SIZE(swap_info_struct) * __swp_type(pte_val));
+	}
+progressf("zql:try_zram_decompress:swap_info=0x%lx\n", swap_info);
+	READ_POINTER(swap_info + SWAP_INFO_BDEV_OFFSET, &bdev);
+	progressf("zql:try_zram_decompress:bdev=0x%lx\n", bdev);
+	READ_POINTER(bdev + OFFSET(block_device_bd_disk), &bd_disk);
+	progressf("zql:try_zram_decompress:bd_disk=0x%lx\n", bd_disk);
+	readmem(bd_disk + GENDISK_DISK_NAME_OFFSET, KVADDR, disk_name,
 			strlen("zram"), "read disk name", gcore_verbose_error_handle());
+	progressf("zql:try_zram_decompress:disk_name=%s\n", disk_name,sizeof("zram"));
 	if (!strncmp(disk_name, "zram", strlen("zram"))) {
 		progressf("This page has swap to zram\n");
 #define GENDISK_PRIVATE_OFFSET 1152
-		zram = ULONG(bd_disk + GENDISK_PRIVATE_OFFSET);
+		READ_POINTER(bd_disk + GENDISK_PRIVATE_OFFSET, &zram);
+		progressf("zql:try_zram_decompress:zram=0x%lx\n", zram);
 		if (THIS_KERNEL_VERSION >= LINUX(2,6,0)) {
 			swp_offset = (ulonglong)__swp_offset(pte_val);
 		} else {
 			swp_offset = (ulonglong)SWP_OFFSET(pte_val);
 		}
+		progressf("zql:try_zram_decompress:swp_offset=0x%lx\n", swp_offset);
 		sector = swp_offset << (PAGE_SHIFT - 9);
+		progressf("zql:try_zram_decompress:sector=0x%lx\n", sector);
 		index = sector >> SECTORS_PER_PAGE_SHIFT;
+		progressf("zql:try_zram_decompress:index=0x%lx\n", index);
 #define ZRAM_TABLE_ENTRY_SIZE 16
-		entry = ULONG(index * ZRAM_TABLE_ENTRY_SIZE + ULONG(zram));
+		READ_POINTER(zram, &zram_table_entry);
+		progressf("try_zram_decompress zram_table_entry=%lx\n", zram_table_entry);
+		READ_POINTER(index * ZRAM_TABLE_ENTRY_SIZE + zram_table_entry, &entry);
 		progressf("try_zram_decompress entry=%lx\n", entry);
-		size = ULONG(index * ZRAM_TABLE_ENTRY_SIZE + ULONG(zram) + 8);
+		READ_POINTER(index * ZRAM_TABLE_ENTRY_SIZE + zram_table_entry + 8, &size);
 		size &= (ZRAM_FLAG_SHIFT -1);
+		progressf("try_zram_decompress size=%lx\n", size);
 #define ZRAM_MEMPOLL_OFFSET 8
-		obj_addr = zram_object_addr(ULONG(zram + ZRAM_MEMPOLL_OFFSET), entry);
+		progressf("try_zram_decompress zram=%lx\n", zram);
+		READ_POINTER(zram + ZRAM_MEMPOLL_OFFSET, &zram);
+		obj_addr = zram_object_addr(zram, entry);
 
 		if (size == PAGE_SIZE) {
 			memcpy(buf, obj_addr, PAGE_SIZE);
@@ -339,7 +381,7 @@ void gcore_coredump(void)
 					      gcore->corename,
 					      strerror(errno));
 			} else {
-				pagefaultf("page fault at %lx\n", addr);
+				//pagefaultf("page fault at %lx\n", addr);
 				if (paddr != 0) {
 					pte_val = paddr;
 					if(try_zram_decompress(pte_val, (unsigned char *)buffer) != 0)
