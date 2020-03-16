@@ -86,10 +86,10 @@ struct zspage {
 
 unsigned char *zram_object_addr(ulong pool, ulong handle)
 {
-	ulong obj, off, class, size, page, zspage;
+	ulong obj, off, class, page, zspage,ret=0;
 	struct zspage zspage_s;
 	physaddr_t paddr;
-	unsigned int obj_idx, class_idx;
+	unsigned int obj_idx, class_idx, size;
 	ulong pages[2], sizes[2];
 
 	READ_POINTER(handle, &obj);
@@ -104,19 +104,31 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 			&zspage_s, sizeof(struct zspage), "readmem address",
 			gcore_verbose_error_handle());
 
-	progressf("zspage magic:0x%x\n", zspage_s.magic);
 	class_idx = zspage_s.class;
+	progressf("zspage magic:0x%x, class_idx=%d\n", zspage_s.magic, zspage_s.class);
+#define ZSPAGE_MAGIC 0x58
+	if(zspage_s.magic != ZSPAGE_MAGIC)
+		error(FATAL, "zspage magic not ZSPAGE_MAGIC:0x%x\n", zspage_s.magic);
 #define POOL_SIZE_CLASS_OFFSET 8
 #define POOL_SIZE_CLASS_SIZE 152
 #define SIZE_CLASS_SIZE_OFFSET  88
-	READ_POINTER(pool + POOL_SIZE_CLASS_OFFSET, &class);
-	class += (class_idx * POOL_SIZE_CLASS_SIZE);
+	class = pool + POOL_SIZE_CLASS_OFFSET;
+	progressf("pool class1:0x%lx,class_idx=%d\n", class, class_idx);
+	class += (class_idx * sizeof(void *));
+	progressf("pool=0x%lx, pool class:0x%lx\n", pool, class);
+	READ_POINTER(class, &class);
 	readmem(class + SIZE_CLASS_SIZE_OFFSET, KVADDR,
 			&size, sizeof(unsigned int), "readmem address",
 			gcore_verbose_error_handle());
+	progressf("zspage class size:%d\n", size);
 	off = (size * obj_idx) & ~PAGE_MASK;
+	progressf("zspage class off:%d\n", off);
 	if (off + size <= PAGE_SIZE) {
-		is_page_ptr(page, &paddr);//get phy addr
+		if (!is_page_ptr(page, &paddr)) {
+			progressf("zspage not a page:%lx\n", page);
+			return NULL;
+		}
+		progressf("obj on one page,paddr1:0x%lx\n", paddr);
 		readmem(PTOV(paddr) + off, KVADDR, zram_buf, size, "readmem zram buffer", gcore_verbose_error_handle());
 		return zram_buf;
 	}
@@ -125,10 +137,18 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 	READ_POINTER(page + PAGE_FREELIST_OFFSET, &pages[1]);
 	sizes[0] = PAGE_SIZE - off;
 	sizes[1] = size - sizes[0];
-
-	is_page_ptr(pages[0], &paddr);
+	progressf("pages[0]:0x%lx, pages[1]:0x%lx, size0=%d,size1=%d\n", pages[0], pages[1],sizes[0],sizes[1]);
+	if (!is_page_ptr(pages[0], &paddr)) {
+		progressf("pages[0] not a page\n");
+		return NULL;
+	}
+	progressf("pages[0]=%lx paddr:%lx,ret = %d\n", pages[0], paddr, ret);
 	readmem(PTOV(paddr) + off, KVADDR, zram_buf, sizes[0], "readmem zram buffer", gcore_verbose_error_handle());
-	is_page_ptr(pages[1], &paddr);
+	if (!is_page_ptr(pages[1], &paddr)) {
+		progressf("pages[1] not a page\n");
+		return NULL;
+	}
+	progressf("pages[1]=%lx paddr:%lx,ret = %d\n", pages[1], paddr, ret);
 	readmem(PTOV(paddr), KVADDR, zram_buf + sizes[0], sizes[1], "readmem zram buffer", gcore_verbose_error_handle());
 #define ZS_HANDLE_SIZE (sizeof(unsigned long))
 	READ_POINTER(page, &obj);
@@ -148,7 +168,7 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 	ulong ret = 0;
 	char disk_name[32] = {0};
 	ulonglong swp_offset;
-	ulong swap_info, bdev, bd_disk, zram, zram_table_entry, sector, index, entry, size;
+	ulong swap_info, bdev, bd_disk, zram, zram_table_entry, sector, index, entry, flags, size;
 	unsigned char *obj_addr;
 
 	progressf("try_zram_decompress pte_val=0x%lx\n",pte_val);
@@ -161,12 +181,9 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 		return ret;
 
 	swap_info = symbol_value("swap_info");
-	progressf("try_zram_decompress111 swap_info=%lx\n", swap_info);
 	if (vt->flags & SWAPINFO_V2) {
 		swap_info += (__swp_type(pte_val) * sizeof(void *));
-		progressf("try_zram_decompress222 swap_info=%lx\n", swap_info);
 		READ_POINTER(swap_info, &swap_info);
-		progressf("try_zram_decompress333 swap_info=%lx\n", swap_info);
 	} else {
 		swap_info += (SIZE(swap_info_struct) * __swp_type(pte_val));
 	}
@@ -195,21 +212,41 @@ progressf("zql:try_zram_decompress:swap_info=0x%lx\n", swap_info);
 		progressf("zql:try_zram_decompress:index=0x%lx\n", index);
 #define ZRAM_TABLE_ENTRY_SIZE 16
 		READ_POINTER(zram, &zram_table_entry);
-		progressf("try_zram_decompress zram_table_entry=%lx\n", zram_table_entry);
-		READ_POINTER(index * ZRAM_TABLE_ENTRY_SIZE + zram_table_entry, &entry);
+		progressf("try_zram_decompress zram_table_entry1=%lx\n", zram_table_entry);
+		zram_table_entry += (index * ZRAM_TABLE_ENTRY_SIZE);
+		progressf("try_zram_decompress zram_table_entry2=%lx\n", zram_table_entry);
+		READ_POINTER(zram_table_entry, &entry);
 		progressf("try_zram_decompress entry=%lx\n", entry);
-		READ_POINTER(index * ZRAM_TABLE_ENTRY_SIZE + zram_table_entry + 8, &size);
-		size &= (ZRAM_FLAG_SHIFT -1);
+		READ_POINTER(zram_table_entry + 8, &flags);
+		progressf("try_zram_decompress flags=%lx\n", flags);
+#define ZRAM_ZRAM_SAME_BIT (1<<25)
+		if (!entry || (flags & ZRAM_ZRAM_SAME_BIT)) {
+			ulong value;
+			READ_POINTER(zram_table_entry, &value);
+			value = entry ? value : 0;
+			memset(buf, value, PAGE_SIZE);
+			progressf("zram same element object=%lx\n", value);
+			return PAGE_SIZE;
+		}
+		size = flags & (ZRAM_FLAG_SHIFT -1);
+		if (size == 0) {
+			progressf("object size is 0\n");
+			return ret;
+		}
+
 		progressf("try_zram_decompress size=%lx\n", size);
 #define ZRAM_MEMPOLL_OFFSET 8
 		progressf("try_zram_decompress zram=%lx\n", zram);
 		READ_POINTER(zram + ZRAM_MEMPOLL_OFFSET, &zram);
 		obj_addr = zram_object_addr(zram, entry);
+		if (obj_addr == NULL)
+			return 0;
 
 		if (size == PAGE_SIZE) {
+			progressf("object size = PAGE_SIZE\n");			
 			memcpy(buf, obj_addr, PAGE_SIZE);
 		} else {
-			lzo_init();
+			progressf("calling lzo1x_decompress_safe\n");
 			lzo1x_decompress_safe(obj_addr, size, buf, &ret, NULL);
 		}
 	}
@@ -243,6 +280,7 @@ void gcore_coredump(void)
 	info = elf_note_info_init();
 
 	fill_elf_header(phnum);
+	lzo_init();
 
 	progressf("Opening file %s ... \n", gcore->corename);
 	gcore->fp = fopen(gcore->corename, "w");
@@ -386,10 +424,12 @@ void gcore_coredump(void)
 					pte_val = paddr;
 					if(try_zram_decompress(pte_val, (unsigned char *)buffer) != 0)
 					{
+						pagefaultf("zram decompress successed\n");
 						if (fwrite(buffer, PAGE_SIZE, 1, gcore->fp) != 1)
 							error(FATAL, "%s: write: %s\n",
 								gcore->corename,
 								strerror(errno));
+						pagefaultf("\n");
 						continue;
 					}
 				}
