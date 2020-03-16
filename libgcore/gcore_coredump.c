@@ -152,6 +152,40 @@ out:
 	return zram_buf;
 }
 
+unsigned char *lookup_swap_cache(ulong pte_val)
+{
+	ulong swp_type, swp_offset, swp_space;
+	struct list_pair lp;
+	physaddr_t paddr;
+	swp_type = __swp_type(pte_val);
+	if (THIS_KERNEL_VERSION >= LINUX(2,6,0)) {
+		swp_offset = (ulonglong)__swp_offset(pte_val);
+	} else {
+		swp_offset = (ulonglong)SWP_OFFSET(pte_val);
+	}
+
+	if (!symbol_exists("swapper_spaces"))
+		return NULL;
+	swp_space = symbol_value("swapper_spaces");
+#define SWAP_ADDRESS_SPACE_SHIFT	14
+#define ADDRESS_SPACE_SIZE	248
+	swp_space += swp_type * sizeof(void *);
+	READ_POINTER(swp_space, &swp_space);
+	swp_space += (swp_offset >> SWAP_ADDRESS_SPACE_SHIFT) * ADDRESS_SPACE_SIZE;
+#define ADDRESS_SPACES_IPAGE 8
+	lp.index = swp_offset;
+	if(do_radix_tree(swp_space, RADIX_TREE_SEARCH, &lp)){
+		progressf("Find page in swap cache\n");
+		if (!is_page_ptr((ulong)lp.value, &paddr)) {
+			progressf("radix page not a page pointer\n");
+			return NULL;
+		}
+		readmem(paddr, PHYSADDR, zram_buf, PAGE_SIZE, "readmem zram buffer", gcore_verbose_error_handle());
+		return zram_buf;
+	}
+	return NULL;
+}
+
 #define SECTOR_SHIFT 9
 #define SECTORS_PER_PAGE_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
 #define SECTORS_PER_PAGE	(1 << SECTORS_PER_PAGE_SHIFT)
@@ -162,7 +196,7 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 	char disk_name[32] = {0};
 	ulonglong swp_offset;
 	ulong swap_info, bdev, bd_disk, zram, zram_table_entry, sector, index, entry, flags, size, outsize;
-	unsigned char *obj_addr;
+	unsigned char *obj_addr = NULL;
 
 	if(pte_val & PTE_VALID)
 		return ret;
@@ -191,6 +225,13 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 		} else {
 			swp_offset = (ulonglong)SWP_OFFSET(pte_val);
 		}
+
+		obj_addr = lookup_swap_cache(pte_val); //lookup page from swap cache
+		if (obj_addr != NULL) {
+			memcpy(buf, obj_addr, PAGE_SIZE);
+			return PAGE_SIZE;
+		}
+
 		sector = swp_offset << (PAGE_SHIFT - 9);
 		index = sector >> SECTORS_PER_PAGE_SHIFT;
 #define ZRAM_TABLE_ENTRY_SIZE 16
