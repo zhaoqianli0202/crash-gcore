@@ -86,7 +86,7 @@ struct zspage {
 
 unsigned char *zram_object_addr(ulong pool, ulong handle)
 {
-	ulong obj, off, class, page, zspage,ret=0;
+	ulong obj, off, class, page, zspage;
 	struct zspage zspage_s;
 	physaddr_t paddr;
 	unsigned int obj_idx, class_idx, size;
@@ -105,7 +105,7 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 	class_idx = zspage_s.class;
 #define ZSPAGE_MAGIC 0x58
 	if(zspage_s.magic != ZSPAGE_MAGIC)
-		error(FATAL, "zspage magic not ZSPAGE_MAGIC:0x%x\n", zspage_s.magic);
+		error(FATAL, "zspage magic incorrect:0x%x\n", zspage_s.magic);
 #define POOL_SIZE_CLASS_OFFSET 8
 #define POOL_SIZE_CLASS_SIZE 152
 #define SIZE_CLASS_SIZE_OFFSET  88
@@ -121,8 +121,8 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 			progressf("zspage not a page pointer:%lx\n", page);
 			return NULL;
 		}
-		readmem(PTOV(paddr) + off, KVADDR, zram_buf, size, "readmem zram buffer", gcore_verbose_error_handle());
-		return zram_buf;
+		readmem(paddr + off, PHYSADDR, zram_buf, size, "readmem zram buffer", gcore_verbose_error_handle());
+		goto out;
 	}
 #define PAGE_FREELIST_OFFSET 32
 	pages[0] = page;
@@ -134,14 +134,16 @@ unsigned char *zram_object_addr(ulong pool, ulong handle)
 		return NULL;
 	}
 
-	readmem(PTOV(paddr) + off, KVADDR, zram_buf, sizes[0], "readmem zram buffer", gcore_verbose_error_handle());
+	readmem(paddr + off, PHYSADDR, zram_buf, sizes[0], "readmem zram buffer", gcore_verbose_error_handle());
 	if (!is_page_ptr(pages[1], &paddr)) {
 		progressf("pages[1] not a page pointer\n");
 		return NULL;
 	}
 
-	readmem(PTOV(paddr), KVADDR, zram_buf + sizes[0], sizes[1], "readmem zram buffer", gcore_verbose_error_handle());
+	readmem(paddr, PHYSADDR, zram_buf + sizes[0], sizes[1], "readmem zram buffer", gcore_verbose_error_handle());
 #define ZS_HANDLE_SIZE (sizeof(unsigned long))
+
+out:
 	READ_POINTER(page, &obj);
 	if(!(obj & (1<<10))) { //PG_OwnerPriv1 flag
 		return (zram_buf + ZS_HANDLE_SIZE);
@@ -159,7 +161,7 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 	ulong ret = 0;
 	char disk_name[32] = {0};
 	ulonglong swp_offset;
-	ulong swap_info, bdev, bd_disk, zram, zram_table_entry, sector, index, entry, flags, size;
+	ulong swap_info, bdev, bd_disk, zram, zram_table_entry, sector, index, entry, flags, size, outsize;
 	unsigned char *obj_addr;
 
 	if(pte_val & PTE_VALID)
@@ -202,7 +204,6 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 			READ_POINTER(zram_table_entry, &value);
 			value = entry ? value : 0;
 			memset(buf, value, PAGE_SIZE);
-			progressf("zram same element object=%lx\n", value);
 			return PAGE_SIZE;
 		}
 		size = flags & (ZRAM_FLAG_SHIFT -1);
@@ -218,9 +219,14 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 
 		if (size == PAGE_SIZE) {
 			memcpy(buf, obj_addr, PAGE_SIZE);
+			ret = PAGE_SIZE;
 		} else {
 			progressf("calling lzo1x_decompress_safe\n");
-			lzo1x_decompress_safe(obj_addr, size, buf, &ret, NULL);
+			ret = lzo1x_decompress_safe(obj_addr, size, buf, &outsize, NULL);
+			if (ret == LZO_E_OK)
+				ret = outsize;
+			else
+				error(WARNING, "zram decompress error\n");
 		}
 	}
 	return ret;
@@ -392,10 +398,10 @@ void gcore_coredump(void)
 					      gcore->corename,
 					      strerror(errno));
 			} else {
-				//pagefaultf("page fault at %lx\n", addr);
+				pagefaultf("page fault at %lx\n", addr);
 				if (paddr != 0) {
 					pte_val = paddr;
-					if(try_zram_decompress(pte_val, (unsigned char *)buffer) != 0)
+					if(try_zram_decompress(pte_val, (unsigned char *)buffer) == PAGE_SIZE)
 					{
 						pagefaultf("zram decompress successed\n");
 						if (fwrite(buffer, PAGE_SIZE, 1, gcore->fp) != 1)
