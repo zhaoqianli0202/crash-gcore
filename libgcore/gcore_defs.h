@@ -1123,6 +1123,16 @@ struct gcore_offset_table
 	long vm_operations_struct_name;
 	long vm_special_mapping_name;
 	long x8664_pda_oldrsp;
+	long swap_info_bdev;
+	long gendisk_name;
+	long gendisk_private_data;
+	long zram_mempoll;
+	long zram_compressor;
+	long zram_table_flag;
+	long page_private;
+	long poll_size_class;
+	long size_class_size;
+	long page_freelist;
 };
 
 struct gcore_size_table
@@ -1141,6 +1151,8 @@ struct gcore_size_table
 	long vm_area_struct_anon_vma;
 	long thread_xstate;
 	long i387_union;
+	long zram_table_entrys;
+	long address_spaces;
 };
 
 #define GCORE_OFFSET(X) (OFFSET_verify(gcore_offset_table.X, (char *)__FUNCTION__, __FILE__, __LINE__, #X))
@@ -1281,5 +1293,35 @@ extern void gcore_default_regsets_init(void);
 #endif
 
 #define VDSO_HIGH_BASE 0xffffe000U
+
+struct zspage {
+    struct {
+        unsigned int fullness : 2;
+        unsigned int class : 9;
+        unsigned int isolated : 3;
+        unsigned int magic : 8;
+    };
+    unsigned int inuse;
+    unsigned int freeobj;
+};
+
+/*support for zram*/
+#define READ_POINTER(addr, pval) \
+				(readmem(addr, KVADDR, pval, sizeof(void *), \
+				"readmem address", gcore_verbose_error_handle()));
+
+#define OBJ_TAG_BITS 1
+#define _PFN_BITS		(PHYS_MASK_SHIFT - PAGE_SHIFT)
+#define OBJ_INDEX_BITS	(BITS_PER_LONG - _PFN_BITS - OBJ_TAG_BITS)
+#define OBJ_INDEX_MASK	((1 << OBJ_INDEX_BITS) - 1)
+#define PAGE_MASK		(~(PAGE_SIZE-1))
+#define ZS_HANDLE_SIZE (sizeof(unsigned long))
+#define ZSPAGE_MAGIC 0x58
+#define SWAP_ADDRESS_SPACE_SHIFT	14
+#define SECTOR_SHIFT 9
+#define SECTORS_PER_PAGE_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
+#define SECTORS_PER_PAGE	(1 << SECTORS_PER_PAGE_SHIFT)
+#define ZRAM_FLAG_SHIFT (1<<24)
+#define ZRAM_FLAG_SAME_BIT (1<<25)
 
 #endif /* GCORE_DEFS_H_ */
