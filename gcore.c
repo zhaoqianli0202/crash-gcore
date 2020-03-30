@@ -558,4 +558,16 @@ static void gcore_machdep_init(void)
 
 	if (!gcore_arch_vsyscall_has_vm_alwaysdump_flag())
 		gcore_machdep->vm_alwaysdump = 0x00000000;
+
+#if defined(ARM) || defined(ARM64)
+#ifdef ARM
+#define STACK_RESERVE_SIZE 8
+#else
+#define STACK_RESERVE_SIZE 16
+#endif
+	if (THIS_KERNEL_VERSION >= LINUX(4,14,0))
+		gcore_machdep->stack_reserve = 0;
+	else
+		gcore_machdep->stack_reserve = STACK_RESERVE_SIZE;
+#endif
 }
