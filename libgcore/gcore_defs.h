@@ -1177,6 +1177,7 @@ extern struct gcore_size_table gcore_size_table;
 struct gcore_machdep_table
 {
 	ulong vm_alwaysdump;
+	uint8_t stack_reserve;
 };
 
 /*

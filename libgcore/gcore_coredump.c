@@ -194,7 +194,7 @@ ulong try_zram_decompress(ulong pte_val, unsigned char *buf)
 		readmem(zram + GCORE_OFFSET(zram_compressor), KVADDR, name,
 			sizeof(name), "zram compressor", gcore_verbose_error_handle());
 		if(!strncmp(name, "lzo", strlen("lzo"))) {
-			decompressor = lzo1x_decompress_safe;
+			decompressor = (void *)lzo1x_decompress_safe;
 		} else {//todo,to support more compressor
 			error(WARNING, "Only support lzo compressor\n");
 			return ret;

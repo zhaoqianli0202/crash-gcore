@@ -29,7 +29,7 @@ static int gpr_get(struct task_context *target,
 
 	BZERO(regs, sizeof(*regs));
 
-	readmem(machdep->get_stacktop(target->task) - 8 - SIZE(pt_regs), KVADDR,
+	readmem(machdep->get_stacktop(target->task) - gcore_machdep->stack_reserve - SIZE(pt_regs), KVADDR,
 		regs, SIZE(pt_regs), "genregs_get: pt_regs",
 		gcore_verbose_error_handle());
 
